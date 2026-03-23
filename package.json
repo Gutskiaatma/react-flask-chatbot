@@ -2,4 +2,8 @@
   "dependencies": {
     "react-markdown": "^10.1.0"
   }
+  "scripts": {
+  "dev": "...",
+  "build": "...",   👈 THIS MUST EXIST
+}
 }
