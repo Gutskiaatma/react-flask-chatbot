@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import re
 
 # -----------------------
-# Load environment
+# Load env
 # -----------------------
 load_dotenv()
 
@@ -18,23 +18,23 @@ load_dotenv()
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)
 
-# ✅ Use /tmp for deployment (Render/Railway safe)
-DB_PATH = os.path.join("/tmp", "chat_history.db")
+# ✅ Render-safe DB path
+DB_PATH = "/tmp/chat_history.db"
 
 # -----------------------
-# Check API Keys
+# API Keys
 # -----------------------
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not GOOGLE_API_KEY:
-    print("⚠️ WARNING: GOOGLE_API_KEY is missing")
+    print("⚠️ GOOGLE_API_KEY missing")
 
 if not OPENAI_API_KEY:
-    print("⚠️ WARNING: OPENAI_API_KEY is missing")
+    print("⚠️ OPENAI_API_KEY missing")
 
 # -----------------------
-# Initialize models (only if keys exist)
+# Models
 # -----------------------
 chat_flash = None
 chat_pro = None
@@ -47,7 +47,6 @@ if GOOGLE_API_KEY:
             google_api_key=GOOGLE_API_KEY,
             temperature=0.7
         )
-
         chat_pro = ChatGoogleGenerativeAI(
             model="gemini-1.5-pro",
             google_api_key=GOOGLE_API_KEY,
@@ -67,11 +66,8 @@ if OPENAI_API_KEY:
         print("❌ OpenAI init error:", e)
 
 # -----------------------
-# Utility functions
+# DB functions
 # -----------------------
-def clean_text(text: str):
-    return re.sub(r'\*{1,3}', '', text)
-
 def get_db_connection():
     return sqlite3.connect(DB_PATH, timeout=10)
 
@@ -91,36 +87,39 @@ def init_db():
         conn.close()
         print("✅ Database initialized")
     except Exception as e:
-        print("❌ DB Init Error:", e)
+        print("❌ DB error:", e)
 
-# ✅ IMPORTANT: Run in production too
+# ✅ Run DB init ALWAYS (important for Render)
 init_db()
 
 # -----------------------
-# API Routes
+# Utils
+# -----------------------
+def clean_text(text: str):
+    return re.sub(r'\*{1,3}', '', text)
+
+# -----------------------
+# Routes
 # -----------------------
 @app.route("/ask", methods=["POST"])
 def ask():
     try:
         data = request.json
-
         if not data:
-            return jsonify({"reply": "Invalid request body"}), 400
+            return jsonify({"reply": "Invalid request"}), 400
 
         user_input = data.get("text", "").strip()
         session_name = data.get("session", "default")
 
         if not user_input:
-            return jsonify({"reply": "Please enter a message."}), 400
+            return jsonify({"reply": "Enter a message"}), 400
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # -----------------------
-        # Check cache
-        # -----------------------
+        # Cache check
         cursor.execute(
-            "SELECT answer FROM chats WHERE question = ? AND session_name = ?",
+            "SELECT answer FROM chats WHERE question=? AND session_name=?",
             (user_input, session_name)
         )
         row = cursor.fetchone()
@@ -130,93 +129,81 @@ def ask():
             return jsonify({"reply": row[0]})
 
         reply = None
-        used_model = None
+        model_used = None
 
-        # -----------------------
         # Try Gemini Flash
-        # -----------------------
         if chat_flash:
             try:
-                response = chat_flash.invoke([{"role": "user", "content": user_input}])
-                reply = response.content if hasattr(response, "content") else str(response)
-                used_model = "gemini-flash"
+                res = chat_flash.invoke([{"role": "user", "content": user_input}])
+                reply = res.content if hasattr(res, "content") else str(res)
+                model_used = "gemini-flash"
             except Exception as e:
-                print("⚠️ Gemini Flash failed:", e)
+                print("Flash error:", e)
 
-        # -----------------------
         # Try Gemini Pro
-        # -----------------------
         if not reply and chat_pro:
             try:
-                response = chat_pro.invoke([{"role": "user", "content": user_input}])
-                reply = response.content if hasattr(response, "content") else str(response)
-                used_model = "gemini-pro"
+                res = chat_pro.invoke([{"role": "user", "content": user_input}])
+                reply = res.content if hasattr(res, "content") else str(res)
+                model_used = "gemini-pro"
             except Exception as e:
-                print("⚠️ Gemini Pro failed:", e)
+                print("Pro error:", e)
 
-        # -----------------------
         # Try OpenAI
-        # -----------------------
         if not reply and chat_openai:
             try:
-                response = chat_openai.invoke([
-                    {"role": "system", "content": "You are a helpful assistant."},
+                res = chat_openai.invoke([
+                    {"role": "system", "content": "You are helpful."},
                     {"role": "user", "content": user_input}
                 ])
-                reply = response.content if hasattr(response, "content") else str(response)
-                used_model = "openai-gpt3.5"
+                reply = res.content if hasattr(res, "content") else str(res)
+                model_used = "openai"
             except Exception as e:
-                print("⚠️ OpenAI failed:", e)
+                print("OpenAI error:", e)
 
-        # -----------------------
-        # If all fail
-        # -----------------------
         if not reply:
-            return jsonify({
-                "reply": "🚫 All AI services failed. Check API keys or logs."
-            }), 500
+            return jsonify({"reply": "🚫 AI failed (check API keys)"}), 500
 
-        # Clean response
         reply = clean_text(reply)
-        formatted_reply = f"[{used_model}] {reply}"
+        final_reply = f"[{model_used}] {reply}"
 
-        # Save to DB
+        # Save
         cursor.execute(
             "INSERT INTO chats (session_name, question, answer) VALUES (?, ?, ?)",
-            (session_name, user_input, formatted_reply)
+            (session_name, user_input, final_reply)
         )
         conn.commit()
         conn.close()
 
-        return jsonify({"reply": formatted_reply})
+        return jsonify({"reply": final_reply})
 
     except Exception as e:
-        print("❌ /ask ERROR:", e)
-        return jsonify({"reply": f"Server Error: {str(e)}"}), 500
+        print("❌ /ask error:", e)
+        return jsonify({"reply": str(e)}), 500
 
 
-@app.route("/sessions", methods=["GET"])
-def list_sessions():
+@app.route("/sessions")
+def sessions():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT session_name FROM chats")
-        sessions = [row[0] for row in cursor.fetchall()]
+        data = [row[0] for row in cursor.fetchall()]
         conn.close()
-        return jsonify({"sessions": sessions})
+        return jsonify({"sessions": data})
     except Exception as e:
-        print("❌ /sessions ERROR:", e)
+        print("❌ sessions error:", e)
         return jsonify({"sessions": []}), 500
 
 
-@app.route("/history/<session_name>", methods=["GET"])
-def session_history(session_name):
+@app.route("/history/<session>")
+def history(session):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT question, answer FROM chats WHERE session_name = ?",
-            (session_name,)
+            "SELECT question, answer FROM chats WHERE session_name=?",
+            (session,)
         )
         rows = cursor.fetchall()
         conn.close()
@@ -228,29 +215,28 @@ def session_history(session_name):
 
         return jsonify({"history": history})
     except Exception as e:
-        print("❌ /history ERROR:", e)
+        print("❌ history error:", e)
         return jsonify({"history": []}), 500
 
 
 # -----------------------
-# Serve React App
+# Serve React
 # -----------------------
 @app.route("/")
-def serve_react():
+def home():
     return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/<path:path>")
-def serve_static(path):
-    file_path = os.path.join(app.static_folder, path)
-    if os.path.exists(file_path):
+def static_proxy(path):
+    if os.path.exists(os.path.join(app.static_folder, path)):
         return send_from_directory(app.static_folder, path)
-    else:
-        return send_from_directory(app.static_folder, "index.html")
+    return send_from_directory(app.static_folder, "index.html")
 
 
 # -----------------------
-# Run
+# LOCAL RUN ONLY
 # -----------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
